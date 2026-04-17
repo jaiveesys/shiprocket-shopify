@@ -15,6 +15,12 @@ const axios   = require('axios');
 const crypto  = require('crypto');
 require('dotenv').config();
 
+const cors = require('cors');
+app.use(cors({
+  origin: 'https://shop.myarusuvai.com',
+  methods: ['GET'],
+}));
+
 const app = express();
 
 // Raw body needed for Shopify HMAC verification
@@ -225,6 +231,63 @@ app.get('/test-shiprocket', async (req, res) => {
       status: '❌ Error',
       error:  err.response?.data || err.message,
     });
+  }
+});
+
+// GET /check-pincode?pincode=400001&weight=0.5
+// Called directly from the Shopify cart page widget
+app.get('/check-pincode', async (req, res) => {
+  try {
+    const { pincode, weight = '0.5' } = req.query;
+
+    if (!pincode || !/^\d{6}$/.test(pincode)) {
+      return res.status(400).json({ error: 'Enter a valid 6-digit pincode' });
+    }
+
+    const token = await getShiprocketToken();
+
+    const { data: srData } = await axios.get(
+      'https://apiv2.shiprocket.in/v1/external/courier/serviceability/',
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        params: {
+          pickup_postcode:   parseInt(process.env.PICKUP_PINCODE, 10),
+          delivery_postcode: parseInt(pincode, 10),
+          weight:            parseFloat(weight),
+          cod:               0,
+        },
+      }
+    );
+
+    const couriers = srData?.data?.available_courier_companies || [];
+
+    if (!couriers.length) {
+      return res.json({ serviceable: false, message: `Delivery not available to ${pincode}` });
+    }
+
+    const seen  = new Set();
+    const rates = couriers
+      .filter(c => c.freight_charge > 0)
+      .sort((a, b) => a.freight_charge - b.freight_charge)
+      .filter(c => {
+        const k = String(c.estimated_delivery_days);
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      })
+      .slice(0, 3)
+      .map(c => ({
+        courier:  c.courier_name,
+        price:    c.freight_charge,
+        days:     c.estimated_delivery_days,
+        etd:      c.etd,
+      }));
+
+    return res.json({ serviceable: true, pincode, rates });
+
+  } catch (err) {
+    console.error('[/check-pincode] Error:', err.response?.data || err.message);
+    return res.status(500).json({ error: 'Failed to check serviceability' });
   }
 });
 
